@@ -5,10 +5,11 @@ import type {
   OpenCodeModelPair,
   OpenCodeOAuthAuthorization,
   OpenCodeProviderAuthMethod,
+  OpenCodeProviderAuthPrompt,
+  OpenCodeProviderAuthPromptCondition,
   OpenCodeProviderConnection,
   OpenCodeProviderDiscovery,
 } from '@agor/core/types';
-import type { createOpencodeClient } from '@opencode-ai/sdk/v2';
 import { createOpenCodeKnownModelCatalog } from '../shared/known-models.js';
 import type { OpenCodeAuthPayload } from './auth-payload.js';
 import {
@@ -37,19 +38,31 @@ const DEFAULT_AUTH_RUNTIME: OpenCodeAuthRuntimeDependencies = {
   verifyOpenCodeAuthFileBoundary: defaultVerifyOpenCodeAuthFileBoundary,
 };
 
-type V2Client = ReturnType<typeof createOpencodeClient>;
-type ProviderAuthMethods = NonNullable<Awaited<ReturnType<V2Client['provider']['auth']>>['data']>;
-type ProviderAuthPrompt = NonNullable<ProviderAuthMethods[string][number]['prompts']>[number];
+type V2Client = Record<string, unknown>;
 
-function safeAuthPrompt(prompt: ProviderAuthPrompt) {
-  const condition = prompt.when ? { when: prompt.when } : {};
-  if (prompt.type === 'select') {
+type RawPrompt = {
+  key?: string;
+  type?: string;
+  message?: string;
+  placeholder?: string;
+  when?: { key?: string };
+  options?: Array<{ label?: string; value: string; hint?: string }>;
+};
+
+function safeAuthPrompt(raw: unknown): OpenCodeProviderAuthPrompt {
+  const prompt = (raw && typeof raw === 'object' ? raw : {}) as RawPrompt;
+  const key = prompt.key ?? 'key';
+  const condition =
+    prompt.when && typeof prompt.when.key === 'string'
+      ? { when: prompt.when as OpenCodeProviderAuthPromptCondition }
+      : {};
+  if (prompt.type === 'select' && Array.isArray(prompt.options)) {
     return {
-      type: prompt.type,
-      key: prompt.key,
-      message: prompt.message,
+      type: 'select',
+      key,
+      message: prompt.message ?? key,
       options: prompt.options.map(({ label, value, hint }) => ({
-        label,
+        label: label ?? value,
         value,
         ...(hint ? { hint } : {}),
       })),
@@ -57,22 +70,28 @@ function safeAuthPrompt(prompt: ProviderAuthPrompt) {
     };
   }
   return {
-    type: prompt.type,
-    key: prompt.key,
-    message: prompt.message,
+    type: 'text',
+    key,
+    message: prompt.message ?? key,
     ...(prompt.placeholder ? { placeholder: prompt.placeholder } : {}),
     ...condition,
   };
 }
 
 function safeMethods(
-  methods: Awaited<ReturnType<V2Client['provider']['auth']>>['data'] | undefined,
+  methods: Record<string, Array<{ type: string; label?: string; prompts?: unknown[] }>> | undefined,
   providerId: string
 ): OpenCodeProviderAuthMethod[] {
-  return (methods?.[providerId] ?? []).map((method, index) => ({
+  return (
+    (methods?.[providerId] ?? []) as Array<{
+      type: string;
+      label?: string;
+      prompts?: unknown[];
+    }>
+  ).map((method, index: number) => ({
     index,
-    type: method.type,
-    label: method.label,
+    type: (method.type === 'oauth' ? 'oauth' : 'api') as 'api' | 'oauth',
+    label: method.label ?? (method.type === 'oauth' ? 'OAuth' : 'API Key'),
     ...(method.prompts
       ? {
           prompts: method.prompts.map(safeAuthPrompt),
@@ -103,8 +122,13 @@ async function withFreshClient<T>(
     dataHome,
     secrets: [...secrets, directory],
   });
-  const { createOpencodeClient } = await loadOpenCodeSdkV2();
-  const client = createOpencodeClient({
+  const sdk = (await loadOpenCodeSdkV2()) as unknown as {
+    createOpencodeClient?: (opts: unknown) => V2Client;
+    OpenCode?: { make: (opts: unknown) => V2Client };
+  };
+  const createClient =
+    sdk.createOpencodeClient ?? ((opts: unknown) => (sdk.OpenCode?.make(opts) ?? {}) as V2Client);
+  const client = createClient({
     baseUrl: server.baseUrl,
     directory,
     headers: { Authorization: server.authorization },
@@ -117,7 +141,9 @@ async function withFreshClient<T>(
     failures.push({ phase: 'operation', error });
   }
   try {
-    await client.instance.dispose({ directory });
+    if (client.instance && typeof client.instance.dispose === 'function') {
+      await client.instance.dispose({ directory });
+    }
   } catch (error) {
     failures.push({ phase: 'instance disposal', error });
   } finally {
@@ -179,6 +205,76 @@ async function readConfigurationSnapshot(
   dataHome: string,
   directory: string
 ): Promise<OpenCodeProviderDiscovery> {
+  if (client.integration && typeof client.integration.list === 'function') {
+    const [integrationsResponse, modelsResponse, _configResponse, credentialProviderIds] =
+      await Promise.all([
+        client.integration.list({ location: { directory } }),
+        client.model && typeof client.model.list === 'function'
+          ? client.model.list({ location: { directory } })
+          : Promise.resolve({ data: [] }),
+        client.config && typeof client.config.get === 'function'
+          ? client.config.get({ location: { directory } }).catch(() => ({ data: {} }))
+          : Promise.resolve({ data: {} }),
+        savedCredentialProviderIds(dataHome),
+      ]);
+    const integrations = integrationsResponse?.data ?? [];
+    const models = modelsResponse?.data ?? [];
+
+    type RawIntegration = {
+      id: string;
+      name?: string;
+      connections?: unknown[];
+      methods?: Array<{ type?: 'api' | 'oauth'; label?: string; name?: string }>;
+    };
+    type RawModel = {
+      providerID?: string;
+      canonical?: string;
+      id?: string;
+      modelID?: string;
+      name?: string;
+      status?: string;
+    };
+    const providers: OpenCodeProviderConnection[] = (integrations as RawIntegration[]).map(
+      (integration) => {
+        const providerModels = (models as RawModel[])
+          .filter((m) => m.providerID === integration.id || m.canonical === integration.id)
+          .map((m) => ({
+            id: m.id || m.modelID || 'unknown',
+            name: m.name || m.id || 'unknown',
+            status: m.status || 'active',
+          }));
+        const hasConnection = Boolean((integration.connections?.length ?? 0) > 0);
+        return {
+          id: integration.id,
+          name: integration.name || integration.id,
+          runtimeAvailable: hasConnection,
+          credentialPresence: credentialPresence(credentialProviderIds, integration.id),
+          authMethods: (integration.methods || []).map((method, index: number) => ({
+            index,
+            type: method.type || 'api',
+            label: method.label || method.name || 'API Key',
+          })),
+          suggestedModel: providerModels[0]?.id,
+          models: providerModels,
+        };
+      }
+    );
+
+    const suggestedProvider =
+      providers.find(
+        (p) => p.runtimeAvailable && p.credentialPresence === 'present' && p.suggestedModel
+      ) ?? providers.find((p) => p.runtimeAvailable && p.suggestedModel);
+
+    return {
+      runtime: 'available',
+      runtimeVersion: OPENCODE_VERSION,
+      providers,
+      suggestedSelection: suggestedProvider?.suggestedModel
+        ? { providerId: suggestedProvider.id, modelId: suggestedProvider.suggestedModel }
+        : undefined,
+    };
+  }
+
   const [modelsResponse, configResponse, providerResponse, authResponse, credentialProviderIds] =
     await Promise.all([
       client.config.providers({ directory }),
@@ -199,21 +295,37 @@ async function readConfigurationSnapshot(
     throw new Error('OpenCode provider configuration discovery failed');
   }
 
-  const modelProviders = new Map(
-    modelsResponse.data.providers.map((provider) => [provider.id, provider] as const)
+  const modelProviders = new Map<
+    string,
+    {
+      id: string;
+      name?: string;
+      models: Record<string, { id: string; name: string; status: string }>;
+    }
+  >(
+    (
+      (modelsResponse.data.providers ?? []) as Array<{
+        id: string;
+        name?: string;
+        models: Record<string, { id: string; name: string; status: string }>;
+      }>
+    ).map((provider) => [provider.id, provider] as const)
   );
-  const runtimeProviders = new Map(
-    providerResponse.data.all.map((provider) => [provider.id, provider] as const)
+  const runtimeProviders = new Map<string, { id: string; name?: string }>(
+    ((providerResponse.data.all ?? []) as Array<{ id: string; name?: string }>).map(
+      (provider) => [provider.id, provider] as const
+    )
   );
-  const providerIds = new Set([
+  const providerIds = new Set<string>([
     ...runtimeProviders.keys(),
     ...modelProviders.keys(),
     ...Object.keys(authResponse.data ?? {}),
     ...(credentialProviderIds ?? []),
   ]);
-  const runtimeAvailable = new Set(providerResponse.data.connected);
+  const runtimeAvailable = new Set<string>(providerResponse.data.connected ?? []);
+  const defaultModels = (modelsResponse.data.default ?? {}) as Record<string, string>;
   const providers = [...providerIds]
-    .map((providerId): OpenCodeProviderConnection => {
+    .map((providerId: string): OpenCodeProviderConnection => {
       const modelProvider = modelProviders.get(providerId);
       const runtimeProvider = runtimeProviders.get(providerId);
       return {
@@ -222,12 +334,10 @@ async function readConfigurationSnapshot(
         runtimeAvailable: runtimeAvailable.has(providerId),
         credentialPresence: credentialPresence(credentialProviderIds, providerId),
         authMethods: safeMethods(authResponse.data, providerId),
-        ...(modelsResponse.data.default[providerId]
-          ? { suggestedModel: modelsResponse.data.default[providerId] }
-          : {}),
+        ...(defaultModels[providerId] ? { suggestedModel: defaultModels[providerId] } : {}),
         models: modelProvider
           ? Object.values(modelProvider.models)
-              .map((model) => ({
+              .map((model: { id: string; name: string; status: string }) => ({
                 id: model.id,
                 name: model.name,
                 status: model.status,
@@ -337,19 +447,44 @@ export async function handleOpenCodeAuth(
             throw new Error('No saved OpenCode credential exists for that provider');
           }
         }
-        const response =
-          payload.params.operation === 'connect-api-key'
-            ? await client.auth.set({
-                providerID: providerId,
-                auth: {
-                  type: 'api',
-                  key: payload.params.apiKey,
-                  ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
-                },
-              })
-            : await client.auth.remove({ providerID: providerId });
-        if (response.error || response.data !== true) {
-          throw new Error('OpenCode rejected the provider credential mutation');
+        if (payload.params.operation === 'connect-api-key') {
+          if (client.credential && typeof client.credential.create === 'function') {
+            await client.credential.create({
+              integrationID: providerId,
+              label: `${providerId}-api-key`,
+              value: { type: 'key', key: payload.params.apiKey },
+            });
+          } else {
+            const response = await client.auth.set({
+              providerID: providerId,
+              auth: {
+                type: 'api',
+                key: payload.params.apiKey,
+                ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
+              },
+            });
+            if (response.error || response.data !== true) {
+              throw new Error('OpenCode rejected the provider credential mutation');
+            }
+          }
+        } else {
+          if (
+            client.credential &&
+            typeof client.credential.list === 'function' &&
+            typeof client.credential.remove === 'function'
+          ) {
+            const list = await client.credential.list();
+            for (const item of list.filter(
+              (c: { integrationID?: string; id?: string }) => c.integrationID === providerId
+            )) {
+              await client.credential.remove({ credentialID: item.id });
+            }
+          } else {
+            const response = await client.auth.remove({ providerID: providerId });
+            if (response.error || response.data !== true) {
+              throw new Error('OpenCode rejected the provider credential mutation');
+            }
+          }
         }
         await runtime.verifyOpenCodeAuthFileBoundary(payload.dataHome, {
           allowMissing: payload.params.operation === 'disconnect',

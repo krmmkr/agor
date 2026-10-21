@@ -4,7 +4,7 @@ import type {
   OpenCodeModelCatalog,
 } from '@agor/core/types';
 
-export const OPENCODE_VERSION = '1.18.31';
+export const OPENCODE_VERSION = '2.1.1';
 
 interface KnownProvider {
   id: string;

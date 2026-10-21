@@ -307,7 +307,7 @@ function waitForReadiness(
     const onData = (chunk: Buffer | string) => {
       output = `${output}${chunk.toString()}`.slice(-MAX_STARTUP_OUTPUT);
       const matches = [
-        ...output.matchAll(/(?:^|\n)opencode server listening on (https?:\/\/[^\s]+)/g),
+        ...output.matchAll(/(?:^|\n)(?:opencode )?server listening on (https?:\/\/[^\s]+)/g),
       ];
       const raw = matches.at(-1)?.[1]?.replace(/[),.;]+$/, '');
       if (!raw) return;
@@ -360,7 +360,7 @@ async function waitForAuthenticatedHealth(
       Math.min(HEALTH_REQUEST_TIMEOUT_MS, remainingMs)
     );
     try {
-      const response = await fetchHealth(`${baseUrl}/global/health`, {
+      const response = await fetchHealth(`${baseUrl}/api/info`, {
         headers: { Authorization: authorization },
         signal: controller.signal,
       });
@@ -428,7 +428,7 @@ export async function startManagedOpenCodeServer(
 
   const randomBytes = dependencies.randomBytes ?? nodeRandomBytes;
   const password = randomBytes(32).toString('base64url');
-  const username = 'agor';
+  const username = 'opencode';
   const authorization = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
   const environment = {
     ...(input.hostedLayout

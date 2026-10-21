@@ -19,6 +19,14 @@ vi.mock('node:fs/promises', async () => {
   return { ...actual, readFile: runtime.readAuthFile };
 });
 
+vi.mock('@opencode/client', () => {
+  const factory = vi.fn(() => runtime.clients.shift());
+  return {
+    createOpencodeClient: factory,
+    OpenCode: { make: factory },
+  };
+});
+
 vi.mock('@opencode-ai/sdk/v2', () => ({
   createOpencodeClient: vi.fn(() => runtime.clients.shift()),
 }));

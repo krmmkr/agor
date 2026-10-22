@@ -154,6 +154,29 @@ function assertExplicitModelAvailable(model: Record<string, unknown>, effort?: E
   ).assertExplicitModelAvailable(client, '/workspace', 'openai', 'gpt-test', effort);
 }
 
+function assertExplicitModelAvailableV2(model: Record<string, unknown>, effort?: EffortLevel) {
+  const tool = new OpenCodeTool({});
+  const client = {
+    model: {
+      list: vi.fn(async () => ({
+        data: [{ id: 'gpt-test', providerID: 'openai', ...model }],
+        error: undefined,
+      })),
+    },
+  };
+  return (
+    tool as unknown as {
+      assertExplicitModelAvailable(
+        client: unknown,
+        directory: string,
+        provider: string,
+        model: string,
+        effort?: EffortLevel
+      ): Promise<void>;
+    }
+  ).assertExplicitModelAvailable(client, '/workspace', 'openai', 'gpt-test', effort);
+}
+
 describe('OpenCodeTool abort cleanup', () => {
   it('keeps the managed server alive until active-session abort settles', async () => {
     const activeSessionAbort = deferred<void>();
@@ -344,6 +367,41 @@ describe('OpenCodeTool prompt variants', () => {
     await expect(
       assertExplicitModelAvailable({ id: 'gpt-test', variants: { max: {} } }, 'max')
     ).resolves.toBeUndefined();
+  });
+
+  it('admits an effort exposed as an array variant in v2 model.list', async () => {
+    await expect(
+      assertExplicitModelAvailableV2(
+        { id: 'gpt-test', variants: [{ id: 'low' }, { id: 'high' }, { id: 'max' }] },
+        'high'
+      )
+    ).resolves.toBeUndefined();
+  });
+
+  it('admits an effort exposed as an object variant in v2 model.list', async () => {
+    await expect(
+      assertExplicitModelAvailableV2({ id: 'gpt-test', variants: { max: {} } }, 'max')
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects an effort not supported by model variants in v2 model.list', async () => {
+    const error = await assertExplicitModelAvailableV2(
+      { id: 'gpt-test', variants: [{ id: 'low' }, { id: 'high' }] },
+      'max'
+    ).catch((failure: unknown) => failure);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/reasoning effort.*not available/i);
+  });
+
+  it('rejects an effort when model variants are empty in v2 model.list', async () => {
+    const error = await assertExplicitModelAvailableV2(
+      { id: 'gpt-test', variants: [] },
+      'high'
+    ).catch((failure: unknown) => failure);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/reasoning effort.*not available/i);
   });
 
   it('rejects an unsupported effort before prompt submission without exposing catalog secrets', async () => {

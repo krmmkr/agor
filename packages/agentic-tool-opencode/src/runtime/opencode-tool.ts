@@ -1171,11 +1171,16 @@ export class OpenCodeTool {
         );
         modelAvailable = Boolean(selectedModel);
         if (modelAvailable && effort) {
-          effortAvailable = Boolean(
-            selectedModel?.variants?.some((v) =>
-              typeof v === 'object' && v ? v.id === effort : v === effort
-            )
-          );
+          const variants = selectedModel?.variants;
+          if (Array.isArray(variants)) {
+            effortAvailable = variants.some((v) =>
+              typeof v === 'object' && v ? (v as { id?: string }).id === effort : v === effort
+            );
+          } else if (variants && typeof variants === 'object') {
+            effortAvailable = Object.hasOwn(variants, effort);
+          } else {
+            effortAvailable = false;
+          }
         }
       } else {
         const query = { directory };

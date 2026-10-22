@@ -227,11 +227,23 @@ export async function verifyOpenCodeAuthFileBoundary(
   const boundary = resolveOpenCodeNativeBoundary(dataHome);
   await assertOwnedDirectoryChain(boundary.homeDir, join(boundary.dataHome, 'opencode'));
   const authPath = join(boundary.dataHome, 'opencode', 'auth.json');
+  const dbPath = join(boundary.dataHome, 'opencode', 'opencode.db');
   let entry: Awaited<ReturnType<typeof lstat>>;
   try {
     entry = await lstat(authPath);
   } catch (error) {
-    if (options.allowMissing && (error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      try {
+        const dbEntry = await lstat(dbPath);
+        if (dbEntry.isFile()) {
+          assertOwnedPrivatePath(dbEntry, 0o600);
+          return;
+        }
+      } catch (dbError) {
+        if ((dbError as NodeJS.ErrnoException).code !== 'ENOENT') throw dbError;
+      }
+      if (options.allowMissing) return;
+    }
     throw error;
   }
   if (!entry.isFile()) throw new Error('OpenCode native auth path must be a regular file');

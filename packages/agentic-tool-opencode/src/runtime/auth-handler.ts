@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type {
   OpenCodeModelCatalog,
   OpenCodeModelPair,
+  OpenCodeModelStatus,
   OpenCodeOAuthAuthorization,
   OpenCodeProviderAuthMethod,
   OpenCodeProviderAuthPrompt,
@@ -38,7 +39,8 @@ const DEFAULT_AUTH_RUNTIME: OpenCodeAuthRuntimeDependencies = {
   verifyOpenCodeAuthFileBoundary: defaultVerifyOpenCodeAuthFileBoundary,
 };
 
-type V2Client = Record<string, unknown>;
+// biome-ignore lint/suspicious/noExplicitAny: OpenCode client dynamically supports v1 and v2 SDK methods
+type V2Client = any;
 
 type RawPrompt = {
   key?: string;
@@ -241,7 +243,7 @@ async function readConfigurationSnapshot(
           .map((m) => ({
             id: m.id || m.modelID || 'unknown',
             name: m.name || m.id || 'unknown',
-            status: m.status || 'active',
+            status: (m.status as OpenCodeModelStatus) || 'active',
           }));
         const hasConnection = Boolean((integration.connections?.length ?? 0) > 0);
         return {
@@ -340,7 +342,7 @@ async function readConfigurationSnapshot(
               .map((model: { id: string; name: string; status: string }) => ({
                 id: model.id,
                 name: model.name,
-                status: model.status,
+                status: (model.status as OpenCodeModelStatus) || 'active',
               }))
               .sort((left, right) => left.id.localeCompare(right.id))
           : [],

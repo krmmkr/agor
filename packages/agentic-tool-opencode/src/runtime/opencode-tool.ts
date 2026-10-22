@@ -689,6 +689,7 @@ function createOpenCodeEventCollector(input: {
         return?: (value?: unknown) => Promise<unknown>;
         stream?: { return?: (value?: unknown) => Promise<unknown> };
       }
+    | AsyncIterable<unknown>
     | undefined;
   let collector: Promise<void> | undefined;
   let stopPromise: Promise<void> | undefined;
@@ -696,10 +697,16 @@ function createOpenCodeEventCollector(input: {
   const stop = () => {
     stopPromise ??= (async () => {
       controller.abort(input.signal.reason);
-      if (subscription?.stream && typeof subscription.stream.return === 'function') {
-        await subscription.stream.return(undefined);
-      } else if (subscription && typeof subscription.return === 'function') {
-        await subscription.return(undefined);
+      const sub = subscription as
+        | {
+            return?: (value?: unknown) => Promise<unknown>;
+            stream?: { return?: (value?: unknown) => Promise<unknown> };
+          }
+        | undefined;
+      if (sub?.stream && typeof sub.stream.return === 'function') {
+        await sub.stream.return(undefined);
+      } else if (sub && typeof sub.return === 'function') {
+        await sub.return(undefined);
       }
       if (collector) await collector;
     })();

@@ -45,6 +45,7 @@ type V2Client = any;
 type RawPrompt = {
   key?: string;
   type?: string;
+  title?: string;
   message?: string;
   placeholder?: string;
   when?: { key?: string };
@@ -54,6 +55,7 @@ type RawPrompt = {
 function safeAuthPrompt(raw: unknown): OpenCodeProviderAuthPrompt {
   const prompt = (raw && typeof raw === 'object' ? raw : {}) as RawPrompt;
   const key = prompt.key ?? 'key';
+  const label = prompt.message ?? prompt.title ?? key;
   const condition =
     prompt.when && typeof prompt.when.key === 'string'
       ? { when: prompt.when as OpenCodeProviderAuthPromptCondition }
@@ -62,9 +64,9 @@ function safeAuthPrompt(raw: unknown): OpenCodeProviderAuthPrompt {
     return {
       type: 'select',
       key,
-      message: prompt.message ?? key,
-      options: prompt.options.map(({ label, value, hint }) => ({
-        label: label ?? value,
+      message: label,
+      options: prompt.options.map(({ label: optLabel, value, hint }) => ({
+        label: optLabel ?? value,
         value,
         ...(hint ? { hint } : {}),
       })),
@@ -74,7 +76,7 @@ function safeAuthPrompt(raw: unknown): OpenCodeProviderAuthPrompt {
   return {
     type: 'text',
     key,
-    message: prompt.message ?? key,
+    message: label,
     ...(prompt.placeholder ? { placeholder: prompt.placeholder } : {}),
     ...condition,
   };
@@ -226,7 +228,13 @@ async function readConfigurationSnapshot(
       id: string;
       name?: string;
       connections?: unknown[];
-      methods?: Array<{ type?: 'api' | 'oauth'; label?: string; name?: string }>;
+      methods?: Array<{
+        type?: string;
+        label?: string;
+        name?: string;
+        form?: unknown[];
+        prompts?: unknown[];
+      }>;
     };
     type RawModel = {
       providerID?: string;
@@ -246,16 +254,29 @@ async function readConfigurationSnapshot(
             status: (m.status as OpenCodeModelStatus) || 'active',
           }));
         const hasConnection = Boolean((integration.connections?.length ?? 0) > 0);
+        const interactiveMethods = (integration.methods || []).filter(
+          (method) => method.type !== 'env'
+        );
+        const resolvedMethods = (
+          interactiveMethods.length > 0 ? interactiveMethods : [{ type: 'key', label: 'API Key' }]
+        ).map((method, index: number) => ({
+          index,
+          type: (method.type === 'oauth' ? 'oauth' : 'api') as 'api' | 'oauth',
+          label: method.label || method.name || (method.type === 'oauth' ? 'OAuth' : 'API Key'),
+          ...(method.prompts || method.form
+            ? {
+                prompts: (((method.prompts || method.form) ?? []) as unknown[]).map(safeAuthPrompt),
+              }
+            : {}),
+        }));
         return {
           id: integration.id,
           name: integration.name || integration.id,
           runtimeAvailable: hasConnection,
-          credentialPresence: credentialPresence(credentialProviderIds, integration.id),
-          authMethods: (integration.methods || []).map((method, index: number) => ({
-            index,
-            type: method.type || 'api',
-            label: method.label || method.name || 'API Key',
-          })),
+          credentialPresence: hasConnection
+            ? 'present'
+            : credentialPresence(credentialProviderIds, integration.id),
+          authMethods: resolvedMethods,
           suggestedModel: providerModels[0]?.id,
           models: providerModels,
         };
@@ -445,7 +466,14 @@ export async function handleOpenCodeAuth(
       async (client) => {
         if (payload.params.operation === 'disconnect') {
           const savedProviders = await savedCredentialProviderIds(payload.dataHome);
-          if (!savedProviders?.has(providerId)) {
+          let hasCredential = Boolean(savedProviders?.has(providerId));
+          if (!hasCredential && client.credential && typeof client.credential.list === 'function') {
+            const list = await client.credential.list().catch(() => []);
+            hasCredential = (list as Array<{ integrationID?: string }>).some(
+              (c) => c.integrationID === providerId
+            );
+          }
+          if (!hasCredential) {
             throw new Error('No saved OpenCode credential exists for that provider');
           }
         }

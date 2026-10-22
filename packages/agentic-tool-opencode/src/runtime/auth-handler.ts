@@ -171,15 +171,45 @@ async function withFreshClient<T>(
 }
 
 async function savedCredentialProviderIds(dataHome: string): Promise<Set<string> | null> {
+  let ids: Set<string> | null = null;
   try {
     const parsed = JSON.parse(
       await readFile(join(dataHome, 'opencode', 'auth.json'), 'utf8')
     ) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    return new Set(Object.keys(parsed));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      ids = new Set(Object.keys(parsed));
+    }
   } catch {
-    return null;
+    // auth.json missing or invalid
   }
+
+  try {
+    const dbPath = join(dataHome, 'opencode', 'opencode.db');
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const table = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'credential'")
+        .get();
+      if (table) {
+        if (!ids) ids = new Set();
+        const rows = db
+          .prepare(
+            'SELECT DISTINCT coalesce(integration_id, connector_id) AS id FROM credential WHERE coalesce(integration_id, connector_id) IS NOT NULL'
+          )
+          .all() as Array<{ id?: string }>;
+        for (const row of rows) {
+          if (row?.id) ids.add(row.id);
+        }
+      }
+    } finally {
+      db.close();
+    }
+  } catch {
+    // opencode.db missing or invalid
+  }
+
+  return ids;
 }
 
 async function discoverModels(
